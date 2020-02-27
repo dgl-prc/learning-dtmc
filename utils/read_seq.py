@@ -1,4 +1,3 @@
-from utils.constant import *
 
 
 def load_data(data_path, symbols_count, start_symbol=None):
@@ -33,4 +32,6 @@ def load_data(data_path, symbols_count, start_symbol=None):
             alphabet = alphabet.union(set(seq))
             if symbols_count != -1 and cnt >= symbols_count:
                 break
+    if cnt < symbols_count:
+        print("no enough data, actual load {} symbols".format(cnt))
     return seq_list, alphabet
