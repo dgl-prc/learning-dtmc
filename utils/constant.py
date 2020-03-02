@@ -2,6 +2,16 @@ import os
 
 ROOT_PATH = "/Users/dong/GitHub/learning-dtmc/"
 
+STM = "state_transition_matrix"
+STWM = "state_transition_weight_matrix"
+PLABEL = "prism_label"
+FFREQ = "id2final_freq"
+ID2FREQ = "id2frequency"
+ID2CHILDREN = "id2children"
+ID2PARENT = "id2parent"
+ID2ACTIONS = "id2actions"
+IDMERGED = "merged_prefix_id"
+
 def get_path(p):
         return os.path.join(ROOT_PATH,p)
 

@@ -1,6 +1,11 @@
-from alergia import *
+import math
+import copy
+import pickle
+from collections import defaultdict
 import numpy as np
+from utils.constant import *
 from utils.time_util import *
+
 '''
 Note that there exists some difference between alergia and aalergia:
 1) how the children of compatible node are treated.
@@ -24,9 +29,10 @@ Note that there exists some difference between alergia and aalergia:
 '''
 
 
-class AALERGIA(ALERGIA):
+class AALERGIA():
 
-    def __init__(self, alpha, S, alphabet, start_symbol, output_path):
+    def __init__(self, alpha, S, alphabet, start_symbol, output_path, show_merge_info=False):
+        self.show_merge_info = show_merge_info
         self.empty = ''
         self.BS = ","  # bound symbol
         self.START_LABEL = start_symbol
@@ -35,80 +41,91 @@ class AALERGIA(ALERGIA):
         assert isinstance(alphabet, set)
         self.alphabet = list(alphabet)
         self.alphabet.sort()
-        # if self.START_LABEL in self.alphabet:
-        #     self.alphabet.remove(self.START_LABEL)
         self.alphabet2id = {w: i for i, w in enumerate(self.alphabet)}
         self.id2alphabet = {i: w for i, w in enumerate(self.alphabet)}
         # note that each seq should be the list type
-        print(current_timestamp(),"extract preifx")
-        self.prefix, self.real_used_len = self.extract_prefix(S)
-        ##########################################
-        # to be consistent with matlab code
-        ##########################################
-        self.prefix.add(self.empty)
-        # FPTAStatesFreq and FPTAStatesAction include empty string
-        print(current_timestamp(), "make fpta")
-        self.FPTAStatesFreq, self.FPTAStatesAction = self.make_fpta_states()
-        self.PDFA_T = self.makePDFA()
+        print(current_timestamp(), "extract preifx")
+        self.prefix2freq, self.FinalStateFreq, self.real_used_len = self.extract_prefix(S)
+        self.prefix = [prefix for prefix in self.prefix2freq]
+        self.prefix2id, self.id2prefix, self.id2parent, self.id2children, self.id2actions = self.order_prefix()
+        self.ori_trans_func, self.ori_trans_wfunc = self.makeDLMC()
+        self.PDFA_T, self.FinalStateProb = self.makePDFA()
         print(current_timestamp())
-        self.T, self.prefix2id, self.id2prefix, self.id2subids, self.id2parent, self.id2actions = self.fpta(
-            self.FPTAStatesFreq,
-            self.FPTAStatesAction)
         self.output_path = output_path
+        assert len(self.prefix2id) == len(self.prefix2freq), "prefix2id:{},prefix:{}".format(len(self.prefix2id),
+                                                                                             len(self.prefix))
 
-        assert len(self.FPTAStatesFreq) == len(self.prefix)
-        assert len(self.prefix2id) == len(self.prefix), "prefix2id:{},prefix:{}".format(len(self.prefix2id),
-                                                                                        len(self.prefix))
-    def fpta(self, FPTAStatesFreq, FPTAStatesAction):
-        ''' make a frequency prefx Tree acceptor
+    def extract_prefix(self, S):
+        prefixe2freq = {}
+        FinalStateFreq = {}
+        used_len_traces = 0
+        for s in S:
+            hash_s = self.BS.join(s)
+            if hash_s in FinalStateFreq:
+                FinalStateFreq[hash_s] += 1
+            else:
+                FinalStateFreq[hash_s] = 1
+            # FinalStateFreq[hash_s] = FinalStateFreq[hash_s] + 1 if s in FinalStateFreq else 1
+            used_len_traces += len(s)
+            for i in range(len(s)):
+                pre = self.BS.join(s[:i + 1])
+                if pre in prefixe2freq:
+                    prefixe2freq[pre] += 1
+                else:
+                    prefixe2freq[pre] = 1
+        for pre in prefixe2freq:
+            if pre not in FinalStateFreq:
+                FinalStateFreq[pre] = 0
+        return prefixe2freq, FinalStateFreq, used_len_traces
+
+    def concat(self, prefix, sigma):
+        return prefix + self.BS + sigma
+
+    def startswith(self, seq, prefix):
+        '''
+        Parameters.
+        -------------
+        seq: list. the sequence.
+        prefix: string. a element of self.prefix
+        Return:
+            bool. Whether or not the given seq is start with the given prefix
+        '''
+        seq_s = self.BS.join(seq)
+        return seq_s.startswith(prefix)
+
+    def order_prefix(self):
+        ''' assign an id to each prefix
         Return:
         prefix2id: dict.
         id2prefix: dict.
         id2children: dict.
-        id2parents: dict. In pdfa, a node may have multiple parents， i.e., it can be reached by multiple nodes.
-        id2actions: dict.
+        id2parents: dict.
         '''
         prefix2id = {}
         id2prefix = {}
         id2parent = {}
         id2children = defaultdict(list)
         id2actions = defaultdict(list)
-
-        empty_node_id = 0
-        empty_node = FPTATree(self.alphabet, self.empty, FPTAStatesFreq[self.empty])
-        prefix2id[self.empty] = empty_node_id
-        id2prefix[empty_node_id] = self.empty
-        id2parent[empty_node_id] = -1
-
-        node_id = 1
-        start_node = FPTATree(self.alphabet, self.START_LABEL, FPTAStatesFreq[self.START_LABEL])
+        node_id = 2
+        queue = [self.START_LABEL]
         prefix2id[self.START_LABEL] = node_id
         id2prefix[node_id] = self.START_LABEL
-        id2parent[node_id] = 0
-
-        id2children[prefix2id[empty_node.prefix]].append(node_id)
-        id2actions[prefix2id[empty_node.prefix]].append(self.START_LABEL)
-
-        queue = [start_node]
+        id2parent[node_id] = -1
         while len(queue) > 0:
             c_node = queue.pop(0)  # current node
-            for sigma, fre in zip(FPTAStatesAction[c_node.prefix][1:], c_node.label[1:]):
-                assert fre != 0
-                prefix = self.concat(c_node.prefix, sigma)
-                if prefix in self.prefix:
+            for sigma in self.alphabet:
+                next_node = self.concat(c_node, sigma)
+                if next_node in self.prefix2freq:
                     node_id += 1
-                    new_node = FPTATree(None, prefix, FPTAStatesFreq[prefix])
-                    prefix2id[prefix] = node_id
-                    id2prefix[node_id] = prefix
-                    id2parent[node_id] = prefix2id[c_node.prefix]
-                    id2children[prefix2id[c_node.prefix]].append(node_id)
-                    id2actions[prefix2id[c_node.prefix]].append(sigma)
-                    queue.append(new_node)
-                    c_node.children.append(new_node)
+                    prefix2id[next_node] = node_id
+                    id2prefix[node_id] = next_node
+                    id2parent[node_id] = prefix2id[c_node]
+                    id2children[prefix2id[c_node]].append(node_id)
+                    id2actions[prefix2id[c_node]].append(sigma)
+                    queue.append(next_node)
+        return prefix2id, id2prefix, id2parent, dict(id2children), id2actions
 
-        return empty_node, prefix2id, id2prefix, id2children, id2parent, id2actions
-
-    def makeDLMC(self, A):
+    def makeDLMC(self):
         '''build DLMC according to two functions (matrices): transition function (matrix)
         and transition weight function (matrix) by using 'id2parents', 'id2children','id2actions'.
         Note that:
@@ -120,32 +137,61 @@ class AALERGIA(ALERGIA):
         '''
         # build transition matrix
         trans_func = defaultdict(defaultdict)
-        id2children = A[ID2CHILDREN]
-        id2actions = A[ID2ACTIONS]
-        state_labels = A[ID2FREQ]
+        # id2children = A[ID2CHILDREN]
+        # state_labels = A[ID2FREQ]
         # assert len(id2children)==len(id2actions) and len(id2children) == len(id2parents)
-        for id in id2children:
-            actions = id2actions[id]
-            children = id2children[id]
+        for id in self.id2children:
+            actions = self.id2actions[id]
+            children = self.id2children[id]
             for action, child in zip(actions, children):
                 trans_func[id][action] = child
-
         # build transition weight matrix
         trans_wfunc = defaultdict(defaultdict)
-        for id in id2children:
-            node_labels = state_labels[id]
-            actions = id2actions[id]
-            children = id2children[id]
+        for id in self.id2children:
+            actions = self.id2actions[id]
+            children = self.id2children[id]
             for action, child in zip(actions, children):
-                w_idx = actions.index(
-                    action) + 1  # note that the first ele in state_labels is the result of empty action.
-                fre = node_labels[w_idx]
+                fre = self.prefix2freq[self.id2prefix[child]]
                 trans_wfunc[id][action] = fre
         return dict(trans_func), dict(trans_wfunc)
 
-    def calculate_threshold(self, q_r, q_b, A):
-        n_r = self.get_number_arriving(q_r, A)
-        n_b = self.get_number_arriving(q_b, A)
+    def makePDFA(self):
+        ''' normalize the frequencies of a state
+        Return: dict. a normalized FPTAStates
+        '''
+        pdfa = {}
+        FinalStateProb = {}
+        for state in self.ori_trans_wfunc:
+            terF = self.FinalStateFreq[self.id2prefix[state]]
+            total = sum([self.ori_trans_wfunc[state][w] for w in self.ori_trans_wfunc[state]]) + terF
+            pdfa[state] = {w: self.ori_trans_wfunc[state][w] / total for w in self.ori_trans_wfunc[state]}
+            FinalStateProb[self.id2prefix[state]] = terF / total
+        leaf_nodes = set([w for w in self.FinalStateFreq]) - set([w for w in FinalStateProb])
+        for state in leaf_nodes:
+            terF = self.FinalStateFreq[state]
+            FinalStateProb[state] = 1. if terF > 0 else 0
+        return pdfa, FinalStateProb
+
+    def get_tp(self, p, sigma):
+        ''' get the transtion probability of 'prefix' based on pdfa of original tree T
+        Parameters.
+        ---------------
+        p: string. the prefix to handle
+        sigma: a word in alphabet
+        Return: float. the termination probability
+        '''
+        if p not in self.prefix:
+            return 0.
+        p_id = self.prefix2id[p]
+        if sigma == self.empty:
+            return self.FinalStateProb[p]
+        if sigma not in self.ori_trans_func[p_id]:
+            return 0.
+        return self.PDFA_T[p_id][sigma]
+
+    def calculate_threshold(self, q_r, q_b):
+        n_r = self.prefix2freq[q_r]  # this include the final string
+        n_b = self.prefix2freq[q_b]  # this include the final string
         c = (6 * self.alpha * math.log(n_r) / n_r) ** 0.5
         c += (6 * self.alpha * math.log(n_b) / n_b) ** 0.5
         return c
@@ -154,7 +200,7 @@ class AALERGIA(ALERGIA):
         symbols = prefix.split(self.BS)
         return symbols[-1]
 
-    def compatible(self, T, red_id, blue_id):
+    def compatible(self, red_id, blue_id):
         '''
         Differences:
             1. AALERGIA dermines the compatibility via the original tree instead of the current automata
@@ -170,23 +216,10 @@ class AALERGIA(ALERGIA):
         last_blue = self.last_symbol(q_b)
         if last_red != last_blue:  # here is different from alergia
             return False
-        threshold = self.calculate_threshold(q_r, q_b, T)
-        return self.compatible_recurse(T, q_r, q_b, 1, 1, threshold)
+        threshold = self.calculate_threshold(q_r, q_b)
+        return self.compatible_recurse(q_r, q_b, 1, 1, threshold)
 
-    def get_tp(self, p, sigma):
-        ''' get the termination probability of 'prefix' based on pdfa of original tree T
-        Parameters.
-        ---------------
-        p: string. the prefix to handle
-        sigma: a word in alphabet
-        Return: float. the termination probability
-        '''
-        if sigma not in self.FPTAStatesAction[p]:
-            return 0.
-        idx = self.FPTAStatesAction[p].index(sigma)
-        return self.PDFA_T[p][idx]
-
-    def compatible_recurse(self, T, q_r, q_b, p_r, p_b, eps):
+    def compatible_recurse(self, q_r, q_b, p_r, p_b, eps):
 
         if p_r <= eps and p_b <= eps:
             return True
@@ -201,12 +234,12 @@ class AALERGIA(ALERGIA):
             qb_s = self.concat(q_b, sigma)
             # if qb_s in self.prefix and qr_s in self.prefix:
             if qb_s in self.prefix or qr_s in self.prefix:
-                if not self.compatible_recurse(T,
-                                               qr_s,
-                                               qb_s,
-                                               p_r * self.get_tp(q_r, sigma),
-                                               p_b * self.get_tp(q_b, sigma),
-                                               eps):
+                if not self.compatible_recurse(
+                        qr_s,
+                        qb_s,
+                        p_r * self.get_tp(q_r, sigma),
+                        p_b * self.get_tp(q_b, sigma),
+                        eps):
                     return False
         return True
 
@@ -230,8 +263,9 @@ class AALERGIA(ALERGIA):
             qb = blue.pop(0)
             # merge the labels of qr abd qb
             dffa[FFREQ][qr] = dffa[FFREQ][qr] + dffa[FFREQ][qb]
+
             if qb not in trans_wfunc:  # qb is leaf node
-                break
+                continue
             else:  # qb is non-leaf node
                 if qr in trans_wfunc:  # qr is non-leaf nodes
                     for sigma in self.alphabet:
@@ -255,66 +289,59 @@ class AALERGIA(ALERGIA):
     def get_children(self, trans_func, prefix_id):
         children = []
         if prefix_id in trans_func.keys():
-            for sigma in trans_func[prefix_id]:
-                children.append(trans_func[prefix_id][sigma])
+            # strictly ordered by the alphabet
+            wids = [self.alphabet2id[w] for w in trans_func[prefix_id]]
+            wids.sort()
+            for wid in wids:
+                children.append(trans_func[prefix_id][self.id2alphabet[wid]])
         return children
 
     def learn(self):
         '''
         :return:
         '''
-        id2freq = {self.prefix2id[pre]: self.FPTAStatesFreq[pre] for pre in self.FPTAStatesFreq}
-        A = {ID2CHILDREN: copy.deepcopy(self.id2subids), ID2PARENT: copy.deepcopy(self.id2parent),
-             ID2FREQ: id2freq, ID2ACTIONS: copy.deepcopy(self.id2actions)}
-        trans_func, trans_wfunc = self.makeDLMC(A)
-        # self.pretty_look(ori_trans_func, ori_trans_wfunc)
         dffa = {}
-        dffa[STM] = trans_func
-        dffa[STWM] = trans_wfunc
-        dffa[FFREQ] = {self.prefix2id[pre]: self.FPTAStatesFreq[pre][0] for pre in self.FPTAStatesFreq}
-        dffa[ID2FREQ] = id2freq
-        dffa[IDMERGED] = []
+        dffa[STM] = copy.deepcopy(self.ori_trans_func)
+        dffa[STWM] = copy.deepcopy(self.ori_trans_wfunc)
+        dffa[FFREQ] = {self.prefix2id[pre]: self.FinalStateFreq[pre] for pre in self.FinalStateFreq}
 
-        ORI_T = copy.deepcopy(A)  # original tree
         RED = [self.prefix2id[self.START_LABEL]]  # add empty string
         BLUE = [self.prefix2id[self.concat(self.START_LABEL, w)] for w in self.alphabet if
-                (self.concat(self.START_LABEL, w)) in self.prefix]
+                (self.concat(self.START_LABEL, w)) in self.prefix2freq]
         BLUE.sort()  # Lexicographic order
         itr_cnt = 1
         while len(BLUE) != 0:
             # debug
-            print("=======iter:{}=====".format(itr_cnt))
-            print("RED:{}".format(RED))
-            print("BLUE:{}".format(BLUE))
+            if self.show_merge_info:
+                print("=======iter:{}=====".format(itr_cnt))
+                print("RED:{}".format(RED))
+                print("BLUE:{}".format(BLUE))
 
             itr_cnt += 1
             blue_id = BLUE.pop(0)
             merged = False
             # try to merge qb with one of the red node
             for red_id in RED:
-                if self.compatible(ORI_T, red_id, blue_id):
+                if self.compatible(red_id, blue_id):
                     self.merge(dffa, red_id, blue_id)
-                    dffa[IDMERGED].append(blue_id)
-                    print("merge {} ---> {}".format(blue_id, red_id))
+                    if self.show_merge_info:
+                        print("merge {} ---> {}".format(blue_id, red_id))
                     merged = True
-                    # self.pretty_look(dffa[STM],dffa[STWM])
                     break
             if not merged:
                 RED.append(blue_id)
-            #     assert np.array([int(cid not in BLUE and cid not in RED) for cid in A[ID2CHILDREN][blue_id]]).all()
-            #     BLUE.extend(A[ID2CHILDREN][blue_id])
-            # if merged:
-                # must re-fetch the children of red nodes
             new_RED_children = []
+            new_blues = []
             for red_id in RED:
-                new_RED_children.extend(self.get_children(trans_func, red_id))
+                new_RED_children.extend(self.get_children(dffa[STM], red_id))
             for child_id in new_RED_children:
                 if child_id not in list(RED + BLUE):
-                    BLUE.append(child_id)
+                    new_blues.append(child_id)
+            BLUE.extend(new_blues)
 
         new_trans_func = {}
         new_trans_wfunc = {}
-        self.pretty_look(dffa[STM], dffa[STWM])
+        # self.pretty_look(dffa[STM], dffa[STWM])
         # note the leaf node which is not in the trans_func
         for id in RED:
             if id in dffa[STM]:
@@ -323,36 +350,29 @@ class AALERGIA(ALERGIA):
             else:
                 new_trans_func[id] = {}
                 new_trans_wfunc[id] = {}
-        print("learned done! final model size:{}".format(len(RED)))
         dffa[STM] = new_trans_func
         dffa[STWM] = new_trans_wfunc
         return dffa
 
-    def pretty_look(self, trans_func, trans_wfunc):
-
-        new_trans_func = np.zeros((len(self.prefix), len(self.alphabet)), dtype=int) + -1
-        for prefix_id in trans_func:
-            for symbol_id in range(len(self.alphabet)):
-                symbol = self.id2alphabet[symbol_id]
-                if symbol in trans_func[prefix_id]:
-                    new_trans_func[prefix_id][symbol_id] = trans_func[prefix_id][symbol]
-                else:
-                    new_trans_func[prefix_id][symbol_id] = -1
-        new_trans_wfunc = np.zeros((len(self.prefix), len(self.alphabet)), dtype=int)
-        for prefix_id in trans_wfunc:
-            for symbol_id in range(len(self.alphabet)):
-                symbol = self.id2alphabet[symbol_id]
-                if symbol in trans_wfunc[prefix_id]:
-                    new_trans_wfunc[prefix_id][symbol_id] = trans_wfunc[prefix_id][symbol]
-                else:
-                    new_trans_wfunc[prefix_id][symbol_id] = 0
-        # print(self.id2prefix[7])
-        # print(self.id2prefix[33])
-        # print(self.id2prefix[47])
-        # for s in self.S:
-        #     print(s)
-        # new_trans_func += 1
-        return new_trans_func, new_trans_wfunc
+    # def pretty_look(self, trans_func, trans_wfunc):
+    #
+    #     new_trans_func = np.zeros((len(self.prefix), len(self.alphabet)), dtype=int) + -1
+    #     for prefix_id in trans_func:
+    #         for symbol_id in range(len(self.alphabet)):
+    #             symbol = self.id2alphabet[symbol_id]
+    #             if symbol in trans_func[prefix_id]:
+    #                 new_trans_func[prefix_id][symbol_id] = trans_func[prefix_id][symbol]
+    #             else:
+    #                 new_trans_func[prefix_id][symbol_id] = -1
+    #     new_trans_wfunc = np.zeros((len(self.prefix), len(self.alphabet)), dtype=int)
+    #     for prefix_id in trans_wfunc:
+    #         for symbol_id in range(len(self.alphabet)):
+    #             symbol = self.id2alphabet[symbol_id]
+    #             if symbol in trans_wfunc[prefix_id]:
+    #                 new_trans_wfunc[prefix_id][symbol_id] = trans_wfunc[prefix_id][symbol]
+    #             else:
+    #                 new_trans_wfunc[prefix_id][symbol_id] = 0
+    #     return new_trans_func, new_trans_wfunc
 
     def _get_valid_states(self, trans_func):
         valid_states = set()
@@ -366,7 +386,7 @@ class AALERGIA(ALERGIA):
 
         trans_func = dffa[STM]
         trans_wfunc = dffa[STWM]
-        self.pretty_look(trans_func, trans_wfunc)
+        # self.pretty_look(trans_func, trans_wfunc)
         pm_file = "{}{}".format(model_name, self.real_used_len)
         pm_path = os.path.join(self.output_path, pm_file + ".pm")
         trans_func_path = os.path.join(self.output_path, pm_file + "_transfunc" + ".pkl")
@@ -427,7 +447,6 @@ class AALERGIA(ALERGIA):
                 new_trans_func[new_id][sigma] = new_next_id
         with open(trans_func_path, "wb") as f:
             pickle.dump(new_trans_func, f)
-
-        print("total state:{}".format(total_states))
+        print("final model size:{}".format(total_states))
         print("Prism model saved in {}".format(pm_path))
         print("Transition Function saved in {}".format(trans_func_path))
